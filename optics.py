@@ -570,7 +570,7 @@ FILM_PRESETS = {
 
 SUBSTRATE_PRESETS = {
     "Fused silica":    {"n": 1.48, "k": 0.0},
-    "Soda-lime glass": {"n": 1.52, "k": 0.0},
+    "Soda-lime glass": {"n": 1.52, "k": 0.01},
     "Sapphire":        {"n": 1.83, "k": 0.0},
     "Si":              {"n": 6.52, "k": 2.99},
     "Custom":          {"n": 1.50, "k": 0.0},

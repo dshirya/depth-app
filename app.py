@@ -70,7 +70,7 @@ k_sub = st.sidebar.number_input(
 )
 d_sub_um = st.sidebar.number_input(
     "Substrate thickness [µm]",
-    value=500.0, min_value=1.0, max_value=100_000.0, step=100.0,
+    value=1.0, min_value=1.0, max_value=100_000.0, step=100.0,
     help="Physical slab thickness. Controls how far the plot extends and determines how much light exits the back face.",
 )
 d_sub_cm = d_sub_um * 1e-4
