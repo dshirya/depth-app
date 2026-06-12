@@ -575,3 +575,172 @@ SUBSTRATE_PRESETS = {
     "Si":              {"n": 6.52, "k": 2.99},
     "Custom":          {"n": 1.50, "k": 0.0},
 }
+
+
+# ---------------------------------------------------------------------------
+# Gaussian beam (paraxial, on-axis) — all z distances in nm, lambda in nm
+# ---------------------------------------------------------------------------
+
+def gaussian_rayleigh_length(n_inc: float, omega_0_nm: float, wavelength_nm: float) -> float:
+    """
+    Rayleigh length in the incident medium.
+
+    z_R = π · n_inc · ω₀² / λ₀   [nm]
+
+    Parameters
+    ----------
+    n_inc : float
+        Real refractive index of the incident medium (usually 1.0 for air)
+    omega_0_nm : float
+        Beam waist radius at focus [nm]
+    wavelength_nm : float
+        Free-space wavelength [nm]
+
+    Returns
+    -------
+    float
+        z_R [nm]
+    """
+    return np.pi * n_inc * omega_0_nm ** 2 / wavelength_nm
+
+
+def gaussian_film_params(
+    n_inc: float, n_c: float, z_R_inc_nm: float, Delta_nm: float
+) -> tuple:
+    """
+    ABCD-refracted beam parameters in the film layer.
+
+    z0_c = (n_c / n_inc) · z_R_inc    [nm]  Rayleigh length in film
+    zw_c = (n_c / n_inc) · Δ          [nm]  waist position from z = 0
+
+    Uses real parts of the refractive indices (paraxial ABCD treatment).
+
+    Parameters
+    ----------
+    n_inc : float   Real RI of incident medium
+    n_c : float     Real part of film RI
+    z_R_inc_nm : float   Rayleigh length in incident medium [nm]
+    Delta_nm : float     Nominal focus depth from sample surface [nm];
+                         Delta < 0 → focus above the surface (in air)
+
+    Returns
+    -------
+    z0_c : float    [nm]
+    zw_c : float    [nm]
+    """
+    f = n_c / n_inc
+    return f * z_R_inc_nm, f * Delta_nm
+
+
+def gaussian_substrate_params(
+    n_inc: float, n_c: float, n_s: float,
+    z_R_inc_nm: float, Delta_nm: float, d_film_nm: float
+) -> tuple:
+    """
+    ABCD-refracted beam parameters seen by the substrate.
+
+    z0_s = (n_s / n_inc) · z_R_inc
+    zw_s = (n_s / n_inc) · Δ + d_film · (1 − n_s / n_c)
+
+    Both measured from z = 0 (sample surface).
+    zw_s < d_film when the geometrical focus falls inside the film;
+    the substrate then sees a diverging beam.
+
+    Parameters
+    ----------
+    n_inc, n_c, n_s : float   Real refractive indices
+    z_R_inc_nm : float        Rayleigh length in incident medium [nm]
+    Delta_nm : float          Nominal focus depth [nm]
+    d_film_nm : float         Film thickness [nm]
+
+    Returns
+    -------
+    z0_s : float    [nm]
+    zw_s : float    [nm]
+    """
+    z0_s = (n_s / n_inc) * z_R_inc_nm
+    zw_s = (n_s / n_inc) * Delta_nm + d_film_nm * (1.0 - n_s / n_c)
+    return z0_s, zw_s
+
+
+def gaussian_kappa_prime(n: float, kappa: float) -> float:
+    """
+    Modified absorption parameter for Gaussian propagation in an absorbing medium.
+
+    κ' = κ / √(n² + κ²)
+
+    For κ = 0 (transparent): κ' = 0 and ω(z) reduces to ω₀·√(1 + ζ²).
+
+    Parameters
+    ----------
+    n : float     Real part of refractive index
+    kappa : float Extinction coefficient
+
+    Returns
+    -------
+    float   κ' ∈ [0, 1)
+    """
+    if kappa == 0.0:
+        return 0.0
+    return kappa / np.sqrt(n ** 2 + kappa ** 2)
+
+
+def gaussian_omega(
+    z_nm: np.ndarray,
+    omega_0_nm: float,
+    zw_nm: float,
+    z0_nm: float,
+    kappa_prime: float,
+) -> np.ndarray:
+    """
+    Beam radius ω(z) inside an absorbing medium (paraxial approximation).
+
+    ζ = (z − z_w) / z₀
+
+    ω(z) = ω₀ · √[ (ζ² + 1 + 2κ'ζ) / (κ'ζ + 1) ]
+
+    For κ' = 0 reduces exactly to ω₀·√(1 + ζ²)  (standard Gaussian).
+
+    Parameters
+    ----------
+    z_nm : array_like   Depth values [nm]
+    omega_0_nm : float  Beam waist (minimum radius, at focus) [nm]
+    zw_nm : float       Waist position from z = 0 [nm]
+    z0_nm : float       Rayleigh length in the medium [nm]
+    kappa_prime : float Modified absorption parameter (gaussian_kappa_prime)
+
+    Returns
+    -------
+    ndarray  ω(z) [nm]
+    """
+    zeta = (np.asarray(z_nm, dtype=float) - zw_nm) / z0_nm
+    denom = np.maximum(kappa_prime * zeta + 1.0, 1e-12)
+    numer = np.maximum(zeta ** 2 + 1.0 + 2.0 * kappa_prime * zeta, 0.0)
+    return omega_0_nm * np.sqrt(numer / denom)
+
+
+def gaussian_conc_factor(
+    z_nm: np.ndarray,
+    omega_0_nm: float,
+    zw_nm: float,
+    z0_nm: float,
+    kappa_prime: float,
+) -> np.ndarray:
+    """
+    On-axis Gaussian concentration factor (ω₀ / ω(z))².
+
+    Mode B correction to the generation profile:
+        G_B(z) = α · I_TMM(z) · gaussian_conc_factor(z, …)
+
+    Equals 1 at the focus (z = z_w).  In the plane-wave limit (ω₀ → ∞,
+    ζ → 0 everywhere) the factor → 1 throughout the medium.
+
+    Parameters
+    ----------
+    (same as gaussian_omega)
+
+    Returns
+    -------
+    ndarray  dimensionless, ≤ 1 for passive media
+    """
+    return (omega_0_nm / gaussian_omega(z_nm, omega_0_nm, zw_nm, z0_nm, kappa_prime)) ** 2

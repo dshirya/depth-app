@@ -15,6 +15,12 @@ from optics import (
     tmm_r_t,
     tmm_intensity_profile,
     tmm_energy_fractions,
+    gaussian_rayleigh_length,
+    gaussian_film_params,
+    gaussian_substrate_params,
+    gaussian_kappa_prime,
+    gaussian_omega,
+    gaussian_conc_factor,
 )
 
 LAMBDA_355_CM = 355e-7  # 355 nm in cm
@@ -155,3 +161,81 @@ def test_tmm_interference_fringes_visible():
     coeffs = np.polyfit(z_norm, log_I, 1)
     residual_rms = np.sqrt(np.mean((log_I - np.polyval(coeffs, z_norm)) ** 2))
     assert residual_rms > 0.005, f"No interference fringes detected (residual_rms={residual_rms:.5f})"
+
+
+# ---------------------------------------------------------------------------
+# Gaussian beam tests
+# ---------------------------------------------------------------------------
+
+def test_gaussian_kappa0_omega():
+    """kappa=0: omega(z) must equal omega_0*sqrt(1+zeta^2) to rtol 1e-10."""
+    omega_0, z0, zw = 500.0, 2000.0, 0.0
+    z = np.linspace(0, 5000, 200)
+    omega_calc = gaussian_omega(z, omega_0, zw, z0, kappa_prime=0.0)
+    zeta = (z - zw) / z0
+    omega_expected = omega_0 * np.sqrt(1.0 + zeta ** 2)
+    np.testing.assert_allclose(omega_calc, omega_expected, rtol=1e-10)
+
+
+def test_gaussian_planewave_limit():
+    """omega_0=1e9 nm: conc_factor ≈ 1 everywhere in film (rtol 1e-4)."""
+    omega_0_huge = 1e9
+    lam_nm = 355.0
+    n_inc, n_c, k_c = 1.0, 2.10, 0.55
+    z_R = gaussian_rayleigh_length(n_inc, omega_0_huge, lam_nm)
+    z0_c, zw_c = gaussian_film_params(n_inc, n_c, z_R, 0.0)
+    kp = gaussian_kappa_prime(n_c, k_c)
+    z = np.linspace(0, 200, 100)
+    cf = gaussian_conc_factor(z, omega_0_huge, zw_c, z0_c, kp)
+    np.testing.assert_allclose(cf, 1.0, rtol=1e-4)
+
+
+def test_gaussian_waist_shift():
+    """n_inc=1, n_c=2.0, Delta=100 nm → zw_c = 200 nm."""
+    z_R = gaussian_rayleigh_length(1.0, 500.0, 355.0)
+    _, zw_c = gaussian_film_params(1.0, 2.0, z_R, 100.0)
+    assert abs(zw_c - 200.0) < 1e-10, f"zw_c = {zw_c}"
+
+
+def test_gaussian_substrate_waist():
+    """n_inc=1, n_c=2.0, n_s=1.5, Delta=100, d_film=300 → zw_s = 225 nm."""
+    z_R = gaussian_rayleigh_length(1.0, 500.0, 355.0)
+    _, zw_s = gaussian_substrate_params(1.0, 2.0, 1.5, z_R, 100.0, 300.0)
+    assert abs(zw_s - 225.0) < 1e-10, f"zw_s = {zw_s}"
+
+
+def test_gaussian_rayleigh_scaling():
+    """z0_c = (n_c/n_inc) * z_R_inc exactly."""
+    n_inc, n_c = 1.0, 2.0
+    z_R = gaussian_rayleigh_length(n_inc, 500.0, 355.0)
+    z0_c, _ = gaussian_film_params(n_inc, n_c, z_R, 0.0)
+    assert abs(z0_c - (n_c / n_inc) * z_R) < 1e-10
+
+
+def test_gaussian_mode_B_larger_near_waist():
+    """Normalised mode B exceeds mode A near the focus (Gaussian concentrates excitation)."""
+    # Tight focus with waist clearly inside the film
+    omega_0, lam_nm = 50.0, 355.0
+    n_inc, n_c, k_c = 1.0, 2.10, 0.55
+    Delta = 50.0   # focus 50 nm below surface
+    d_film = 200.0
+
+    z_R = gaussian_rayleigh_length(n_inc, omega_0, lam_nm)
+    z0_c, zw_c = gaussian_film_params(n_inc, n_c, z_R, Delta)
+    kp = gaussian_kappa_prime(n_c, k_c)
+
+    z = np.linspace(0, d_film, 400)
+    alpha = alpha_from_k(k_c, lam_nm * 1e-7)
+    I_ref = np.ones_like(z)   # simplified flat reference intensity
+
+    G_A = alpha * I_ref
+    G_B = alpha * I_ref * gaussian_conc_factor(z, omega_0, zw_c, z0_c, kp)
+
+    # Normalise B to same total absorbed energy as A
+    G_B_norm = G_B * (G_A.sum() / G_B.sum())
+
+    # At the waist, normalised mode B must exceed mode A
+    iz = int(np.argmin(np.abs(z - zw_c)))
+    assert G_B_norm[iz] > G_A[iz], (
+        f"Mode B not larger at waist: B_norm={G_B_norm[iz]:.4f} vs A={G_A[iz]:.4f}"
+    )

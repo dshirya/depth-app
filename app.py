@@ -21,6 +21,12 @@ from optics import (
     tmm_absorbed_density,
     tmm_energy_fractions,
     substrate_exit_fraction,
+    gaussian_rayleigh_length,
+    gaussian_film_params,
+    gaussian_substrate_params,
+    gaussian_kappa_prime,
+    gaussian_omega,
+    gaussian_conc_factor,
     FILM_PRESETS,
     SUBSTRATE_PRESETS,
 )
@@ -70,7 +76,7 @@ k_sub = st.sidebar.number_input(
 )
 d_sub_um = st.sidebar.number_input(
     "Substrate thickness [µm]",
-    value=1.0, min_value=1.0, max_value=100_000.0, step=100.0,
+    value=1.0, min_value=1.0, max_value=100_000.0, step=1.0,
     help="Physical slab thickness. Controls how far the plot extends and determines how much light exits the back face.",
 )
 d_sub_cm = d_sub_um * 1e-4
@@ -85,10 +91,27 @@ use_tmm = st.sidebar.toggle(
          "Important when film thickness ≈ λ/(4n). Disable to use the simpler Beer–Lambert model.",
 )
 
+st.sidebar.header("Laser focusing")
+omega_0_nm = st.sidebar.number_input(
+    "Beam waist ω₀ [nm]",
+    value=500.0, min_value=10.0, max_value=1_000_000.0, step=50.0,
+    help="1/e² intensity radius at the beam focus. Large values → plane-wave limit.",
+)
+Delta_nm = st.sidebar.number_input(
+    "Focus depth Δ below surface [nm]",
+    value=0.0, min_value=-10_000.0, max_value=10_000.0, step=50.0,
+    help="Apparent focus position below the air/film interface (measured in the incident medium). "
+         "0 = waist at the surface; positive = focusing into the film; negative = focus above surface.",
+)
+n_inc = st.sidebar.number_input(
+    "n of incident medium",
+    value=1.0, min_value=0.1, max_value=5.0, step=0.1,
+    help="Refractive index of the medium above the film (air = 1.0). Affects Rayleigh length scaling.",
+)
+
 # ---------------------------------------------------------------------------
 # Physics
 # ---------------------------------------------------------------------------
-# Simple Fresnel (always computed for reference / Beer–Lambert fallback)
 R_air_fresnel = fresnel_R_air(n_film, k_film)
 R_fs = fresnel_R_interface(n_film, k_film, n_sub, k_sub)
 R_back = fresnel_R_air(n_sub, k_sub)
@@ -115,8 +138,15 @@ else:
     A_film_display = film_absorption_fraction(I0, R_air_fresnel, alpha_film, d_film_cm, R_fs) / I0
     T_display = substrate_transmission_fraction(I0, R_air_fresnel, alpha_film, d_film_cm, R_fs) / I0
 
-# Back-face exit fraction
 I_exit_frac = substrate_exit_fraction(I0, T_display, alpha_sub, d_sub_cm, n_sub, k_sub) / I0
+
+# Gaussian beam physics
+z_R_inc_nm = gaussian_rayleigh_length(n_inc, omega_0_nm, wavelength_nm)
+z0_c_nm, zw_c_nm = gaussian_film_params(n_inc, n_film, z_R_inc_nm, Delta_nm)
+z0_s_nm, zw_s_nm = gaussian_substrate_params(n_inc, n_film, n_sub, z_R_inc_nm, Delta_nm, d_film_nm)
+kappa_prime_c = gaussian_kappa_prime(n_film, k_film)
+kappa_prime_s = gaussian_kappa_prime(n_sub, k_sub)
+validity_ratio = d_film_nm / z0_c_nm if z0_c_nm > 0 else 0.0
 
 # ---------------------------------------------------------------------------
 # Warning
@@ -149,8 +179,7 @@ c2.metric(
 c3.metric(
     "Absorption coefficient α",
     f"{alpha_film:.3e} cm⁻¹",
-    help="α = 4πk/λ [cm⁻¹]. Controls how quickly intensity decays inside the film. "
-         "A larger α means more of the laser is absorbed near the surface.",
+    help="α = 4πk/λ [cm⁻¹]. Controls how quickly intensity decays inside the film.",
 )
 c4.metric(
     "k_film" + (" (derived)" if alpha_mode else ""),
@@ -169,14 +198,13 @@ c6.metric(
     "99% absorption depth",
     f"{d99s_nm:.0f} nm" if np.isfinite(d99s_nm) else "∞",
     help="Depth at which 99% of the transmitted (post-reflection) light is absorbed: "
-         "d₉₉ = ln(100)/α. Does not account for surface reflection losses.",
+         "d₉₉ = ln(100)/α.",
 )
 c7.metric(
     "99% total attenuation depth",
     f"{d99c_nm:.0f} nm" if np.isfinite(d99c_nm) else "∞",
     help="Depth at which only 1% of the incident light remains (reflection + absorption combined): "
-         "d₉₉ = ln(100·(1−R))/α. Slightly shallower than the simple variant because some light "
-         "is already reflected at the surface.",
+         "d₉₉ = ln(100·(1−R))/α.",
 )
 if delta_sub_nm is not None:
     c8.metric(
@@ -188,15 +216,14 @@ else:
     c8.metric(
         "1/e depth in substrate δ_sub",
         "∞ (transparent)",
-        help="k_sub = 0 → no absorption in substrate (flat intensity profile).",
+        help="k_sub = 0 → no absorption in substrate.",
     )
 
 c9, c10, c11 = st.columns(3)
 c9.metric(
     "Light absorbed in film",
     f"{A_film_display * 100:.1f}%",
-    help="Fraction of incident I₀ absorbed before reaching the substrate. "
-         "With TMM: 1 − R_total − T_total. Without TMM: Beer–Lambert estimate.",
+    help="Fraction of incident I₀ absorbed before reaching the substrate.",
 )
 c10.metric(
     "Light entering substrate",
@@ -207,11 +234,9 @@ c11.metric(
     "Light exiting back face",
     f"{I_exit_frac * 100:.2f}%",
     help=f"Fraction surviving Beer–Lambert decay across {d_sub_um:.0f} µm substrate, "
-         "minus Fresnel reflection at the substrate/air back face. "
-         "R_back = ((n_sub−1)²+k_sub²) / ((n_sub+1)²+k_sub²).",
+         "minus Fresnel reflection at the substrate/air back face.",
 )
 
-# Energy balance line
 R_pct = R_display * 100
 A_pct = A_film_display * 100
 T_pct = T_display * 100
@@ -220,7 +245,6 @@ st.caption(
     f"into substrate {T_pct:.1f}% = {R_pct+A_pct+T_pct:.1f}%"
 )
 
-# Reference expanders
 with st.expander("Physics reference — formulas"):
     fc1, fc2 = st.columns(2)
     with fc1:
@@ -232,6 +256,10 @@ with st.expander("Physics reference — formulas"):
         st.latex(r"\delta = \frac{1}{\alpha} = \frac{\lambda}{4\pi k}")
         st.write("**99% attenuation depth (reflection-corrected)**")
         st.latex(r"d_{99} = \frac{\ln\!\bigl(100\,(1-R)\bigr)}{\alpha}")
+        st.write("**Gaussian Rayleigh length**")
+        st.latex(r"z_R = \frac{\pi\,n_{\rm inc}\,\omega_0^2}{\lambda}")
+        st.write("**Waist position after refraction into film**")
+        st.latex(r"z_w = \frac{n_{\rm film}}{n_{\rm inc}}\,\Delta")
     with fc2:
         st.write("**Air/film Fresnel reflectance**")
         st.latex(r"R = \frac{(n-1)^2 + k^2}{(n+1)^2 + k^2}")
@@ -246,6 +274,13 @@ with st.expander("Physics reference — formulas"):
             r"-iN_1\sin\phi & \cos\phi\end{pmatrix}"
             r"\quad \phi=\tfrac{2\pi N_1 d}{\lambda}"
         )
+        st.write("**Beam radius in absorbing medium**")
+        st.latex(
+            r"\omega(z)=\omega_0\sqrt{\frac{\zeta^2+1+2\kappa'\zeta}{\kappa'\zeta+1}},"
+            r"\quad\zeta=\frac{z-z_w}{z_0},\quad\kappa'=\frac{\kappa}{\sqrt{n^2+\kappa^2}}"
+        )
+        st.write("**Mode B generation rate (Gaussian-corrected)**")
+        st.latex(r"G_B(z)=\alpha\,I_{\rm TMM}(z)\!\left(\frac{\omega_0}{\omega(z)}\right)^{\!2}")
 
     with st.expander("Derivation note: why d₉₉ depends on R but δ does not"):
         st.markdown(
@@ -267,6 +302,74 @@ with st.expander("How to measure k for your own films"):
     st.markdown("Convert to k via $k = \\alpha\\lambda/(4\\pi)$.")
 
 # ---------------------------------------------------------------------------
+# Gaussian beam results
+# ---------------------------------------------------------------------------
+st.subheader("Gaussian beam parameters")
+
+gc1, gc2, gc3, gc4 = st.columns(4)
+gc1.metric(
+    "Rayleigh length z_R (air)",
+    f"{z_R_inc_nm:.0f} nm",
+    help="z_R = π·n_inc·ω₀²/λ. Distance from the waist at which beam area doubles.",
+)
+gc2.metric(
+    "Rayleigh length in film z₀",
+    f"{z0_c_nm:.0f} nm",
+    help="z₀ = (n_film/n_inc)·z_R. Scales with the film refractive index after refraction.",
+)
+gc3.metric(
+    "Waist position in film z_w",
+    f"{zw_c_nm:.0f} nm",
+    help="z_w = (n_film/n_inc)·Δ. Geometric waist shifts deeper due to refraction.",
+)
+gc4.metric(
+    "d_film / z₀ (validity ratio)",
+    f"{validity_ratio:.2f}",
+    help="< 0.2: plane-wave model accurate. 0.2–1.0: moderate focusing. > 1.0: correction important.",
+)
+
+if validity_ratio < 0.2:
+    st.success(
+        f"Validity ratio {validity_ratio:.2f} < 0.2 — Gaussian correction negligible. "
+        "The plane-wave model is accurate for this focus geometry."
+    )
+elif validity_ratio < 1.0:
+    st.info(
+        f"Validity ratio {validity_ratio:.2f} (0.2–1.0) — Moderate beam focusing. "
+        "Gaussian correction reshapes the generation profile noticeably near the waist."
+    )
+else:
+    st.warning(
+        f"Validity ratio {validity_ratio:.2f} > 1.0 — Tight focus. "
+        "Gaussian beam correction significantly alters the excitation depth profile."
+    )
+
+with st.expander("Why the plane-wave model is not enough (focused beams)"):
+    st.markdown("""
+The Beer–Lambert / TMM model treats the laser as a plane wave: uniform transverse profile and
+no axial variation except from absorption. This breaks down when the beam is tightly focused:
+
+**a. Axial intensity gradient near the waist.** A Gaussian beam has a finite Rayleigh length
+z₀ inside the film. The beam area ω(z)² varies along the optical axis — smallest at the waist,
+growing on either side. The on-axis intensity (∝ 1/ω²) therefore peaks at the waist, adding an
+axial modulation on top of Beer–Lambert absorption.
+
+**b. The carrier generation profile is compressed near the waist.** Even if every absorbed photon
+has the same probability of generating a carrier, more carriers are created per nm³ at the waist
+because more photons pass through each unit volume there. Mode B corrects for this by weighting
+G(z) = α · I(z) · (ω₀/ω)².
+
+**c. Waist position shifts upon refraction.** When the beam crosses the air/film interface, the
+paraxial Snell condition maps the apparent focus depth Δ to z_w = (n_film/n_inc)·Δ inside the
+film. For n_film/n_inc = 2, the waist is twice as deep as expected from the geometric air-side
+setting — ignoring this gives a wrong estimate of the excitation centroid.
+
+**d. Validity criterion.** The correction is significant when d_film / z₀ > 0.2. If the film is
+much thinner than the Rayleigh length, the beam radius barely changes across the film and the
+plane-wave model is fine. See validity ratio above.
+""")
+
+# ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
 st.subheader("Depth profiles")
@@ -275,10 +378,20 @@ plot_col, ctrl_col = st.columns([5, 1])
 with ctrl_col:
     log_scale = st.toggle("Log y-axis", value=False)
     show_gen = st.toggle("Show absorption profile", value=True)
+    if show_gen:
+        gauss_mode = st.radio(
+            "Mode",
+            ["A (plane-wave)", "B (Gaussian)"],
+            index=0,
+            help="Mode A: standard TMM/Beer–Lambert generation profile. "
+                 "Mode B: Gaussian-corrected — weighted by (ω₀/ω)², normalized to same total energy.",
+        )
+    else:
+        gauss_mode = "A (plane-wave)"
 
 # Depth arrays
 z_film_nm = np.linspace(0, d_film_nm, 500)
-z_sub_nm = np.linspace(0, d_sub_um * 1e3, 500)  # µm → nm for plot axis
+z_sub_nm = np.linspace(0, d_sub_um * 1e3, 500)
 z_film_cm = z_film_nm * 1e-7
 z_sub_cm = z_sub_nm * 1e-7
 
@@ -297,7 +410,23 @@ else:
         z_film_cm, z_sub_cm, I0, R_air_fresnel, alpha_film, d_film_cm, R_fs, alpha_sub
     )
 
-# Back-face step for the intensity plot
+# Gaussian concentration factors — substrate z is measured from film/substrate interface
+cf_film = gaussian_conc_factor(z_film_nm, omega_0_nm, zw_c_nm, z0_c_nm, kappa_prime_c)
+cf_sub = gaussian_conc_factor(z_sub_nm, omega_0_nm, zw_s_nm, z0_s_nm, kappa_prime_s)
+
+# Mode A and Mode B generation profiles in I₀/nm
+gen_film_A = gen_film * 1e-7
+gen_sub_A = gen_sub * 1e-7
+gen_film_B_raw = gen_film * cf_film * 1e-7
+gen_sub_B_raw = gen_sub * cf_sub * 1e-7
+
+# Normalize B to same total absorbed energy as A
+sum_A = np.trapezoid(gen_film_A, z_film_nm) + np.trapezoid(gen_sub_A, z_sub_nm)
+sum_B = np.trapezoid(gen_film_B_raw, z_film_nm) + np.trapezoid(gen_sub_B_raw, z_sub_nm)
+norm_B = (sum_A / sum_B) if (sum_B > 0 and sum_A > 0) else 1.0
+gen_film_B = gen_film_B_raw * norm_B
+gen_sub_B = gen_sub_B_raw * norm_B
+
 z_backface_nm = d_film_nm + d_sub_um * 1e3
 I_sub_back = I_sub[-1] * (1 - R_back)
 
@@ -307,27 +436,13 @@ if n_plots == 1:
     axes = [axes]
 
 ax1 = axes[0]
-
-# Substrate shading
 ax1.axvspan(d_film_nm, z_backface_nm, alpha=0.10, color="steelblue")
-
-# Intensity curves
 ax1.plot(z_film_nm, I_film / I0, color="crimson", lw=2, label="Film")
 ax1.plot(d_film_nm + z_sub_nm, I_sub / I0, color="steelblue", lw=2, label="Substrate")
-
-# Back-face vertical step
 ax1.axvline(z_backface_nm, color="navy", lw=1.5, ls="--", label=f"Back face ({d_sub_um:.0f} µm)")
-# Drop dot showing back-face reflection loss
-ax1.plot(
-    [z_backface_nm, z_backface_nm],
-    [I_sub[-1] / I0, I_sub_back / I0],
-    color="navy", lw=2,
-)
-
-# Film/substrate interface
+ax1.plot([z_backface_nm, z_backface_nm], [I_sub[-1] / I0, I_sub_back / I0], color="navy", lw=2)
 ax1.axvline(d_film_nm, color="black", lw=1.5, ls="--", label=f"Interface ({d_film_nm:.0f} nm)")
 
-# Annotate delta inside film
 if np.isfinite(delta_film_nm) and delta_film_nm < d_film_nm:
     yval_delta = (1 - R_display) * np.exp(-1)
     ax1.axvline(delta_film_nm, color="orange", lw=1, ls=":", alpha=0.9)
@@ -335,85 +450,169 @@ if np.isfinite(delta_film_nm) and delta_film_nm < d_film_nm:
         f"δ = {delta_film_nm:.0f} nm",
         xy=(delta_film_nm, yval_delta / I0),
         xytext=(delta_film_nm + d_film_nm * 0.07, yval_delta / I0 * 1.15),
-        fontsize=8, color="darkorange",
+        fontsize=10, color="darkorange",
         arrowprops=dict(arrowstyle="->", color="darkorange", lw=0.8),
     )
 
-# Annotate d99
 if np.isfinite(d99c_nm) and d99c_nm < z_backface_nm:
     ax1.axvline(d99c_nm, color="purple", lw=1, ls=":", alpha=0.9)
     ax1.annotate(
         f"d₉₉ = {d99c_nm:.0f} nm",
         xy=(d99c_nm, 0.01),
         xytext=(d99c_nm + d_film_nm * 0.07, 0.04),
-        fontsize=8, color="purple",
+        fontsize=10, color="purple",
         arrowprops=dict(arrowstyle="->", color="purple", lw=0.8),
     )
 
-ax1.set_xlabel("Depth z [nm]")
-ax1.set_ylabel("I(z) / I₀")
-ax1.set_title("Laser intensity vs depth")
+ax1.set_xlabel("Depth z [nm]", fontsize=12)
+ax1.set_ylabel("I(z) / I₀", fontsize=12)
+ax1.set_title("Laser intensity vs depth", fontsize=12)
 if log_scale:
     ax1.set_yscale("log")
     ax1.set_ylim(bottom=1e-4)
 else:
     ax1.set_ylim(bottom=0)
-ax1.legend(fontsize=8)
+ax1.legend(fontsize=12)
 ax1.grid(True, alpha=0.3)
 
 if show_gen:
     ax2 = axes[1]
-    # Convert from I₀/cm to I₀/nm for nicer axis numbers
-    gen_film_per_nm = gen_film * 1e-7
-    gen_sub_per_nm = gen_sub * 1e-7
+    use_mode_B = (gauss_mode == "B (Gaussian)")
 
     ax2.axvspan(d_film_nm, z_backface_nm, alpha=0.10, color="steelblue")
-    ax2.fill_between(z_film_nm, gen_film_per_nm, alpha=0.25, color="crimson")
-    ax2.fill_between(d_film_nm + z_sub_nm, gen_sub_per_nm, alpha=0.25, color="steelblue")
-    ax2.plot(z_film_nm, gen_film_per_nm, color="crimson", lw=2, label="Film")
-    ax2.plot(d_film_nm + z_sub_nm, gen_sub_per_nm, color="steelblue", lw=2, label="Substrate")
     ax2.axvline(d_film_nm, color="black", lw=1.5, ls="--")
     ax2.axvline(z_backface_nm, color="navy", lw=1.5, ls="--")
-    ax2.set_xlabel("Depth z [nm]")
-    ax2.set_ylabel("Absorbed intensity [I₀/nm]")
-    ax2.set_title("Where is the laser absorbed?\n(PL excitation depth profile)")
+
+    # Mode A — gray dashed; dimmed when Mode B is active
+    alpha_A = 0.45 if use_mode_B else 1.0
+    ax2.plot(z_film_nm, gen_film_A, color="gray", lw=1.5, ls="--",
+             alpha=alpha_A, label="Mode A (plane-wave)")
+    ax2.plot(d_film_nm + z_sub_nm, gen_sub_A, color="gray", lw=1.5, ls="--", alpha=alpha_A)
+    if not use_mode_B:
+        ax2.fill_between(z_film_nm, gen_film_A, alpha=0.25, color="crimson")
+        ax2.fill_between(d_film_nm + z_sub_nm, gen_sub_A, alpha=0.25, color="steelblue")
+
+    # Mode B — solid colored; dimmed when Mode A is active
+    alpha_B = 1.0 if use_mode_B else 0.45
+    ax2.plot(z_film_nm, gen_film_B, color="crimson", lw=2, alpha=alpha_B, label="Mode B (Gaussian)")
+    ax2.plot(d_film_nm + z_sub_nm, gen_sub_B, color="steelblue", lw=2, alpha=alpha_B)
+    if use_mode_B:
+        ax2.fill_between(z_film_nm, gen_film_B, alpha=0.25, color="crimson")
+        ax2.fill_between(d_film_nm + z_sub_nm, gen_sub_B, alpha=0.25, color="steelblue")
+
+    ax2.set_xlabel("Depth z [nm]", fontsize=12)
+    ax2.set_ylabel("Absorbed intensity [I₀/nm]", fontsize=12)
+    ax2.set_title("Where is the laser absorbed?\n(PL excitation depth profile)", fontsize=12)
     if log_scale:
         ax2.set_yscale("log")
-        peak = max(gen_film_per_nm.max() if len(gen_film_per_nm) else 1,
-                   gen_sub_per_nm.max() if len(gen_sub_per_nm) else 1e-20)
-        ax2.set_ylim(bottom=peak * 1e-5)
+        peak = max(
+            gen_film_A.max() if gen_film_A.size else 1e-20,
+            gen_film_B.max() if gen_film_B.size else 1e-20,
+            gen_sub_A.max() if gen_sub_A.size else 1e-20,
+            gen_sub_B.max() if gen_sub_B.size else 1e-20,
+        )
+        ax2.set_ylim(bottom=max(peak * 1e-5, 1e-20))
     else:
         ax2.set_ylim(bottom=0)
-    ax2.legend(fontsize=8)
+    ax2.legend(fontsize=12)
     ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
-
 with plot_col:
     st.pyplot(fig)
 plt.close(fig)
 
 if show_gen:
     st.info(
-        "**Reading the absorption profile:** Each point shows how much laser energy is deposited "
-        "per nanometre at that depth. The area under the **film curve** (pink) vs the "
-        "**substrate curve** (blue) is proportional to the fraction of PL signal originating "
-        "from each layer — useful for judging substrate PL contamination."
+        "**Reading the absorption profile:** Each point shows laser energy deposited per nm at that depth. "
+        "Area under the **film curve** (pink) vs **substrate curve** (blue) is proportional to the "
+        "fraction of PL signal from each layer. "
+        "**Mode A** (gray dashed) = plane-wave. **Mode B** (solid) = Gaussian-corrected, "
+        "normalized to the same total absorbed energy."
     )
 
 if use_tmm:
     st.caption(
         "Oscillations inside the film region are **thin-film interference** (standing wave). "
-        "They are most prominent when the film thickness ≈ λ/(4n) and become negligible "
-        "for thick strongly-absorbing films."
+        "Most prominent when film thickness ≈ λ/(4n)."
     )
+
+# ---------------------------------------------------------------------------
+# Gaussian beam envelope plot
+# ---------------------------------------------------------------------------
+st.subheader("Gaussian beam envelope")
+
+# Air: from -2·z_R to the surface
+z_air_plot = np.linspace(-2.0 * z_R_inc_nm, 0.0, 400)
+omega_air_plot = omega_0_nm * np.sqrt(1.0 + ((z_air_plot - Delta_nm) / z_R_inc_nm) ** 2)
+
+# Film: 0 to d_film_nm (same array as depth profiles)
+omega_film_plot = gaussian_omega(z_film_nm, omega_0_nm, zw_c_nm, z0_c_nm, kappa_prime_c)
+
+# Substrate: show up to 3·z0_s or full substrate, whichever is shorter
+z_sub_env_max = min(d_sub_um * 1e3, 3.0 * z0_s_nm + 200.0)
+z_sub_env = np.linspace(0.0, z_sub_env_max, 400)
+omega_sub_plot = gaussian_omega(z_sub_env, omega_0_nm, zw_s_nm, z0_s_nm, kappa_prime_s)
+
+z_env = np.concatenate([z_air_plot, z_film_nm, d_film_nm + z_sub_env])
+omega_env = np.concatenate([omega_air_plot, omega_film_plot, omega_sub_plot])
+
+fig2, ax_env = plt.subplots(figsize=(12, 4))
+
+ax_env.axvspan(z_air_plot[0], 0.0, alpha=0.06, color="gray")
+ax_env.axvspan(0.0, d_film_nm, alpha=0.12, color="crimson")
+ax_env.axvspan(d_film_nm, d_film_nm + z_sub_env_max, alpha=0.08, color="steelblue")
+
+ax_env.fill_between(z_env, -omega_env, omega_env, alpha=0.25, color="gold")
+ax_env.plot(z_env, omega_env, color="darkorange", lw=2, label="ω(z)")
+ax_env.plot(z_env, -omega_env, color="darkorange", lw=2)
+
+ax_env.axhline(omega_0_nm, color="dimgray", ls=":", lw=1, label=f"ω₀ = {omega_0_nm:.0f} nm")
+ax_env.axhline(-omega_0_nm, color="dimgray", ls=":", lw=1)
+
+ax_env.axvline(0.0, color="black", lw=1.5, ls="--")
+ax_env.axvline(d_film_nm, color="black", lw=1.5, ls="--")
+
+# Label regions
+y_top = omega_env.max() * 0.88
+ax_env.text(-z_R_inc_nm, y_top, "Air", fontsize=10, color="gray", ha="center")
+ax_env.text(d_film_nm / 2, y_top, "Film", fontsize=10, color="crimson", ha="center")
+ax_env.text(d_film_nm + z_sub_env_max / 2, y_top, "Substrate",
+            fontsize=10, color="steelblue", ha="center")
+
+# Waist annotation (only if inside the film)
+if 0.0 <= zw_c_nm <= d_film_nm:
+    ax_env.axvline(zw_c_nm, color="crimson", lw=1, ls=":", alpha=0.8)
+    ax_env.annotate(
+        f"film waist\nz_w = {zw_c_nm:.0f} nm",
+        xy=(zw_c_nm, omega_0_nm * 0.05),
+        xytext=(zw_c_nm + d_film_nm * 0.3, omega_env.max() * 0.35),
+        fontsize=10, color="crimson", ha="left",
+        arrowprops=dict(arrowstyle="->", color="crimson", lw=0.8),
+    )
+
+ax_env.set_xlabel("Depth z [nm]  (negative = air above film)")
+ax_env.set_ylabel("Beam radius ω(z) [nm]")
+ax_env.set_title("Gaussian beam envelope through the film stack")
+ax_env.legend(fontsize=10, loc="lower right")
+ax_env.grid(True, alpha=0.3)
+plt.tight_layout()
+
+st.pyplot(fig2)
+plt.close(fig2)
+
+st.caption(
+    "The gold band shows ±ω(z), the 1/e² intensity radius along the optical axis. "
+    "Absorption damping in the film is accounted for via κ' = κ/√(n²+κ²). "
+    "Paraxial, on-axis approximation — valid when ω₀ ≫ λ."
+)
 
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 st.caption(
-    "**v1 limitations:** Normal incidence only. Transfer Matrix Method covers coherent "
-    "single-film interference but excludes multiple coherent layers (full TMM stack), "
-    "incoherent multiple reflections at the back face, and non-normal incidence. "
-    "See README.md for details."
+    "**v1 limitations:** Normal incidence only. TMM covers coherent single-film interference "
+    "but excludes full multilayer stacks, incoherent multiple reflections at the back face, "
+    "and non-normal incidence. Gaussian correction uses the paraxial on-axis approximation "
+    "(valid when ω₀ ≫ λ). See README.md for details."
 )
